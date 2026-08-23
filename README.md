@@ -1,2 +1,2 @@
 # black-hole-stem-ysy
-Just a simulation of blackhole muhahahahaha
+Now wait for ui and js system thatscooking my brain bruh 
