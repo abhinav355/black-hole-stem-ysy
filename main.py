@@ -1,8 +1,7 @@
-import json, math ,time,  random  ,threading
+import json, math, time, random, threading
 from collections import deque
 
-#its my 6th attempt to make bruh 2026 i should be better i mean way better then this in 2027
-#TODO: fix this horrible mess later
+#its my 8th attempt to make and 19th update. i should be better i mean way better then this in 2027
 def clamp(value,low,high):
     if value<low:
         return low
@@ -14,26 +13,16 @@ def normalize_2d(x, y):
     if magnitude < 1e-12:
         return (0.0, 0.0)
     return (x / magnitude, y / magnitude)
-def hash_int(n):
-    n=((n>>13)^n)*1274126177
-    return ((n>>16)^n&0x7fffffff)/0x7fffffff
-def noise_1d(x):
-    ix=int(math.floor(x))
-    fx=x-ix
-    fx=fx*fx*(3-2*fx)
-    return hash_int(ix)+(hash_int(ix+1)-hash_int(ix))*fx
-def fbm(x, octaves=4):
-    val=0.0; a=0.5; f=1.0
-    for _ in range(octaves):
-        val+=a*noise_1d(x*f)
-        a*=0.5
-        f*=2.17
-    return val
-GRAVITY = 800
-C_SIM = 400
-MAX_PARTICLES=2000
-TRAIL_LEN = 40
+
+GRAVITY = 80
+C_SIM = 140
+CSCR = 420.0
+MAX_PARTICLES = 1200
+TRAIL_LEN = 18
 PI2 = math.pi * 2
+M_MAX = 14.0
+WIN_H = 780
+
 def horizon_radius(mass):
     return 2.0 * GRAVITY * mass / (C_SIM * C_SIM)
 def orbital_speed(r, mass):
@@ -56,16 +45,7 @@ def disk_temp(r, mass, mdot):
     fac=3.0*GRAVITY*mass*mdot/(8.0*math.pi*C_SIM**3)
     inner=1.0-rs/x
     return (fac*inner/(r**3))**0.25
-def disk_luminosity(_mass, mdot):
-    _ = _mass
-    return 0.1*mdot*C_SIM**2
 def kerr_horizon(mass, spin):
-    M=horizon_radius(mass)/2.0
-    a=spin*M
-    d=M*M-a*a
-    if d<0: return horizon_radius(mass)
-    return M+math.sqrt(d)
-def kerr_ergo(mass, spin):
     M=horizon_radius(mass)/2.0
     a=spin*M
     d=M*M-a*a
@@ -78,27 +58,24 @@ def frame_drag_omega(r, mass, spin):
 def gr_correction(v_squared):
     return 1.0 + 3.0 * v_squared / (C_SIM * C_SIM)
 def eddington_lum(mass_kg):
-    return 4*math.pi*6.674e-11*mass_kg*1.673e-27*2.998e-8/6.652e-29
+    return 4*math.pi*6.674e-11*mass_kg*1.673e-27*2.998e8/6.652e-29
 def qnm_freq(mass):
     M=horizon_radius(mass)/2.0
     real_part=0.3737*C_SIM/(PI2*max(M,0.01))
     imag_part=0.0890*C_SIM/(PI2*max(M,0.01))
     return real_part, imag_part
-def temp_to_rgb(t):
-    t=clamp(t,0,1)
-    if t<0.2:
-        f=t/0.2
-        r,g,b=clamp(int(20+160*f),0,255),clamp(int(5+25*f),0,255),clamp(int(40+20*f),0,255)
-    elif t<0.5:
-        f=(t-0.2)/0.3
-        r,g,b=clamp(int(180+75*f),0,255),clamp(int(30+90*f),0,255),clamp(int(60-40*f),0,255)
-    elif t<0.8:
-        f=(t-0.5)/0.3
-        r,g,b=255,clamp(int(120+120*f),0,255),clamp(int(20+60*f),0,255)
-    else:
-        f=(t-0.8)/0.2
-        r,g,b=clamp(int(255-35*f),0,255),clamp(int(240),0,255),clamp(int(80+175*f),0,255)
-    return "rgb(%d,%d,%d)"%(r,g,b)
+
+def shadow_px(mass, spin=0.0):
+    #the shadow the canvas actually draws, in px. blob world lives here
+    b = 35.1*math.pow(max(mass, 0.1)/5.0, 0.45)*(1.0-0.13*spin)
+    if b < 22.0: b = 22.0
+    hi = WIN_H*0.16
+    if b > hi: b = hi
+    return b
+
+def blobG(mass):
+    return shadow_px(mass)*CSCR*CSCR/(2.0*max(mass, 0.1))
+
 bh_x=0.0
 bh_y=0.0
 bh_mass=   5.0
@@ -117,9 +94,12 @@ ripples =[]
 bg_stars =[]
 lensed_stars =[]
 disk_rings=[]
-ray_paths=[]
-ray_timer= 0.0
-event_log=deque( maxlen=20)
+ray_paths = []
+ray_timer = 0.0
+lens_timer = 0.0
+ring_timer = 0.0
+frame_timer = 0.0
+event_log = deque(maxlen=20)
 #dicttt to semd
 frame_data = {}
 frame_dirty = False
@@ -130,18 +110,27 @@ def init_everything():
     global sim_time, dt, accretion_rate, total_eaten, jet_timer
     global entropy_val, blobs, particles, ripples
     global bg_stars, lensed_stars, disk_rings
-    global ray_paths, ray_timer, frame_data, frame_dirty, event_log
+    global ray_paths, ray_timer
+    global lens_timer, ring_timer, frame_timer
+    global frame_data, frame_dirty, event_log
 
     bh_x=0.0; bh_y=0.0; bh_mass=5.0; bh_spin=0.0
     paused=False; dead=False; sim_time=0.0; dt=1.0/60.0
     accretion_rate=0.0; total_eaten=0.0; jet_timer=0.0
     entropy_val=0.0
     blobs=[]; particles=[]; ripples=[]
-    bg_stars=[]; lensed_stars=[]; disk_rings=[]
-    ray_paths=[]; ray_timer=0.0
-    frame_data={}; frame_dirty=False
-    event_log=deque(maxlen=20)
-    make_bg_stars(600)
+    bg_stars = []
+    lensed_stars = []
+    disk_rings = []
+    ray_paths = []
+    ray_timer = 0.0
+    lens_timer = 0.0
+    ring_timer = 0.0
+    frame_timer = 0.0
+    frame_data = {}
+    frame_dirty = False
+    event_log = deque(maxlen=20)
+    make_bg_stars(420)
     make_disk_rings(80)
 
 
@@ -172,41 +161,99 @@ def make_disk_rings(n):
         r=rin+frac*(rout-rin)
         t=disk_temp(r, bh_mass, max(accretion_rate, 0.01))
         disk_rings.append((r, t, frac))
-def try_grow_existing_blob(wx, wy, amount):
-    for b in blobs:
-        if not b["alive"]:
-            continue
-        dx = wx - b["x"]
-        dy = wy - b["y"]
-        distance = math.sqrt(dx*dx + dy*dy)
-        if distance < b["draw_radius"] + 15:
-            b["mass"] += amount
-            b["draw_radius"] = min(b["draw_radius"] + 2.5, 60)
-            event_log.append("grew blob to " + str(round(b["mass"], 1)))
-            return True
-    return False
 
+def try_grow_existing_blob(wx, wy, amount):
+    active = [
+        b for b in blobs
+        if b["alive"]
+    ]
+    if not active:
+        return False
+    b = min(
+        active,
+        key=lambda item: (
+            (wx - item["x"]) ** 2 +
+            (wy - item["y"]) ** 2
+        ),)
+    if (wx-b["x"])**2+(wy-b["y"])**2 > 70.0*70.0:
+        return False
+    b["mass"] += amount
+    b["draw_radius"] = min(
+        8.0 +
+        math.sqrt(max(b["mass"], 0.1)) * 4.0,
+        34.0,)
+    event_log.append(
+        "grew single clump to " +
+        str(round(b["mass"], 1))
+)
+    return True
 
 def make_blob(wx, wy, amount):
+    dx = wx - bh_x
+    dy = wy - bh_y
+    radius = max(
+        math.sqrt(dx * dx + dy * dy),
+        shadow_px(bh_mass) * 1.6,
+    )
+    G = blobG(bh_mass)
+    vc = math.sqrt(G*bh_mass/radius)
+    tx, ty = normalize_2d(-dy, dx)
+    inward_x, inward_y = normalize_2d(-dx, -dy)
+    orbit_speed = min(
+        orbital_speed(radius, bh_mass) * 0.0 + vc * 0.55,
+        CSCR * 0.30,
+    )
+    infall_speed = min(
+        orbit_speed * 0.12,
+        CSCR * 0.04, )
     return {
         "x": wx,
-        "y": wy,
+       "y": wy,
+        "vx": (
+            tx * orbit_speed +
+            inward_x * infall_speed
+     ),
+        "vy": (
+            ty * orbit_speed +
+            inward_y * infall_speed
+     ),
         "mass": amount,
-        "draw_radius": 4.0 + amount * 1.5,
+        "draw_radius": min(
+            8.0 +
+            math.sqrt(max(amount, 0.1)) * 4.0,
+            34.0,),
         "alive": True,
         "born": sim_time,
-        "hue": random.uniform(0, 1),
-    }
-
+        "hue": 0.08,}
 #want to die T_T
 def add_mass_at(wx, wy, amount=1.0):
     global accretion_rate
     if not try_grow_existing_blob(wx, wy, amount):
-        blobs.append(make_blob(wx, wy, amount))
-        event_log.append("new blob at %.0f, %.0f" % (wx, wy))
-    for _ in range(5):
-        particles.append(make_ambient_particle(wx, wy))
-    ripples.append(make_ripple(wx, wy, 150, 120, min(0.15 + amount*0.05, 0.6)))
+        if len(blobs) < 36:
+            blobs.append(
+                make_blob(
+                    wx,
+                  wy,
+                    amount,
+         )
+            )
+            event_log.append(
+                "new single mass at %.0f, %.0f" %
+                (wx, wy)
+        )
+        else:
+            event_log.append("clump cap")
+    ripples.append(
+        make_ripple(
+            wx,
+            wy,
+            150,
+            120,
+            min(
+                0.15 + amount * 0.05,
+                0.6,
+),))
+
 def make_ambient_particle(cx, cy):
     ang=random.uniform(0, PI2)
     off=random.uniform(10, 60)
@@ -237,38 +284,135 @@ def make_disk_particle():
 def make_jet_particle(direction):
     sp=C_SIM*random.uniform(0.3, 0.8)
     return {"x":bh_x+random.gauss(0,2),"y":bh_y,"vx":random.gauss(0,0.08)*sp*0.3,"vy":direction*sp,"br":random.uniform(0.6,1),"ht":0.1+random.uniform(0,0.2),"age":0.0,"die":random.uniform(3,10),"tr":deque(maxlen=TRAIL_LEN),"tp":1,"sz":random.uniform(1,2)}
-
 def make_ripple(ox, oy, max_r, speed, strength):
     return {"ox":ox,"oy":oy,"r":0,"mr":max_r,"sp":speed,"st":strength,"t0":sim_time}
 def update_blobs():
     global bh_mass, total_eaten, accretion_rate
-    rs = horizon_radius(bh_mass)
+    if not blobs:
+        return
+    sh = shadow_px(bh_mass, bh_spin)
+    G = blobG(bh_mass)
+    mu = G*bh_mass
+    n = len(blobs)
+    ax = [0.0]*n
+    ay = [0.0]*n
+
+    for i in range(n):
+        bi = blobs[i]
+        if not bi["alive"]:
+            continue
+        for j in range(i+1, n):
+            bj = blobs[j]
+            if not bj["alive"]:
+                continue
+            dx = bj["x"]-bi["x"]
+            dy = bj["y"]-bi["y"]
+            d2 = dx*dx + dy*dy + 250.0
+            d = math.sqrt(d2)
+            if d < (bi["draw_radius"]+bj["draw_radius"])*0.85 + 6.0:
+                m = bi["mass"]+bj["mass"]
+                big, small = (bi, bj) if bi["mass"] >= bj["mass"] else (bj, bi)
+                wvx = (bi["vx"]*bi["mass"]+bj["vx"]*bj["mass"])/m
+                wvy = (bi["vy"]*bi["mass"]+bj["vy"]*bj["mass"])/m
+                big["vx"] = (wvx+big["vx"])*0.5
+                big["vy"] = (wvy+big["vy"])*0.5
+                big["mass"] = m
+                big["draw_radius"] = min(8.0+math.sqrt(max(m, 0.1))*4.0, 34.0)
+                small["alive"] = False
+                ripples.append(make_ripple(big["x"], big["y"], 130, 150, 0.3))
+                event_log.append("clumps merged, m=%.1f" % m)
+                continue
+            f = G/d2
+            if f > 300.0:
+                f = 300.0
+            ux = dx/d
+            uy = dy/d
+            ax[i] += f*bj["mass"]*ux
+            ay[i] += f*bj["mass"]*uy
+            ax[j] -= f*bi["mass"]*ux
+            ay[j] -= f*bi["mass"]*uy
+            lim = (bi["draw_radius"]+bj["draw_radius"])*2.4
+            if d < lim:
+                k = (1.0-d/lim)*1.2
+                dvx = bj["vx"]-bi["vx"]
+                dvy = bj["vy"]-bi["vy"]
+                ax[i] += k*dvx; ay[i] += k*dvy
+                ax[j] -= k*dvx; ay[j] -= k*dvy
+
     surviving = []
-    for b in blobs:
+    for i in range(n):
+        b = blobs[i]
         if not b["alive"]:
             continue
         dx = bh_x - b["x"]
         dy = bh_y - b["y"]
         r = math.sqrt(dx*dx + dy*dy)
-        if r < rs * 1.05:
-            bh_mass += b["mass"] * 0.7
-            total_eaten += b["mass"] * 0.7
+        if r < sh * 1.06:
+            swallowed_mass = b["mass"] * 0.7
+            room = M_MAX - bh_mass
+            if room > 0.0:
+                bh_mass += min(swallowed_mass, room)
+            total_eaten += b["mass"]
             accretion_rate += b["mass"] * 2.0
-            ripples.append(make_ripple(b["x"], b["y"], 200, 180, min(0.2+b["mass"]*0.03, 0.5)))
-            event_log.append("ate %.1f, bh=%.1f" % (b["mass"], bh_mass))
+            ripples.append(
+                make_ripple(
+                    b["x"],
+                    b["y"],
+                    200,
+                    180,
+                    min(
+                        0.2 + b["mass"] * 0.03,
+                        0.5,
+                    ),
+                )
+            )
+            event_log.append(
+                "ate %.1f, bh=%.1f" %
+                (b["mass"], bh_mass)
+            )
             continue
-
-        #neoh sys to pull itin!
-        accel = GRAVITY * bh_mass / (r * r)
+        safe_r = max(r, sh * 1.1)
+        L = b["x"]*b["vy"] - b["y"]*b["vx"]
+        bend = 1.0 + 3.0*L*L/(CSCR*CSCR*safe_r*safe_r)
+        accel = (
+            mu /
+            (safe_r * safe_r)
+            * bend
+        )
+        if accel > 4000.0:
+            accel = 4000.0
         nx, ny = normalize_2d(dx, dy)
-        tx, ty = -ny, nx
-        spiral = 0.15 + 0.1 * math.sin(sim_time * 0.5 + b["born"])
+        b["vx"] += nx * accel * dt
+        b["vy"] += ny * accel * dt
+        tdf = 1.0
+        if r < sh * 8.0:
+            tdf = math.sqrt(max(1.0 - sh*0.85/max(r, 1.0), 0.18))
+        hd = dt * tdf
 
-        b["x"] += (nx * accel + tx * accel * spiral) * dt
-        b["y"] += (ny * accel + ty * accel * spiral) * dt
-        # tini tiny drag
-        b["x"] *= 0.9998
-        b["y"] *= 0.9998
+        b["vx"] *= 0.9992
+        b["vy"] *= 0.9992
+        speed = math.sqrt(
+            b["vx"] ** 2 +
+            b["vy"] ** 2
+        )
+        escape_speed = math.sqrt(
+            2.0 * mu / safe_r
+        )
+        bound_speed = min(
+            CSCR * 0.85,
+            escape_speed * 0.96,
+        )
+        if speed > bound_speed:
+            cap = bound_speed / speed
+            b["vx"] *= cap
+            b["vy"] *= cap
+        b["x"] += b["vx"] * hd
+        b["y"] += b["vy"] * hd
+        if not (math.isfinite(b["x"]) and math.isfinite(b["y"])):
+            continue
+        if math.hypot(b["x"], b["y"]) > 1900.0:
+            event_log.append("clump drifted off")
+            continue
         surviving.append(b)
     blobs.clear()
     blobs.extend(surviving)
@@ -278,26 +422,38 @@ def step_particle(p):
     p["age"] += dt
     if p["age"] > p["die"]:
         return False
-
     dx = bh_x - p["x"]
     dy = bh_y - p["y"]
     r = math.sqrt(dx*dx + dy*dy)
     if r < rs * 1.01:
         bh_mass += p["sz"] * 0.001
         return False
-    v_sq = p["vx"]**2 + p["vy"]**2
+    v_sq = p["vx"] ** 2 + p["vy"] ** 2
     gr = gr_correction(v_sq)
-    accel = GRAVITY * bh_mass / (r * r) * gr
-
+    safe_r = max(r, rs * 1.08)
+    compactness = clamp(
+        rs / safe_r,
+        0.0,
+        0.92,
+    )
+    accel = (
+        GRAVITY * bh_mass / (safe_r * safe_r)
+        * (1.0 + 0.8 * compactness * compactness)
+        * gr
+    )
     nx, ny = normalize_2d(dx, dy)
     p["vx"] += nx * accel * dt
     p["vy"] += ny * accel * dt
-    if bh_spin > 0.01:
+    if bh_spin > 0.01 and r < rs * 18:
         tx, ty = -ny, nx
-        fd = bh_spin * GRAVITY * bh_mass / (r * r * C_SIM) * 50
+        fd = (
+            bh_spin *
+            GRAVITY *
+            bh_mass /
+            (safe_r * safe_r * C_SIM)
+            * 9)
         p["vx"] += tx * fd * dt
         p["vy"] += ty * fd * dt
-
     # nothing goes faster than light and i know u know
     speed = math.sqrt(p["vx"]**2 + p["vy"]**2)
     if speed > C_SIM * 0.99:
@@ -311,6 +467,13 @@ def step_particle(p):
     p["br"] = max(0, 1.0 - p["age"] / p["die"])
     if r <rs* 6:
         p["ht"] = clamp(1.0 - (r - rs) / (rs * 5), 0.1, 1.0)
+    if p["tp"] == 0:
+        viscosity = 1.0 - min(
+        0.012,
+        dt * (0.004 + compactness * 0.02),
+        )
+        p["vx"] *= viscosity
+        p["vy"] *= viscosity
 
     #ignore gravity and just fly out
     if p["tp"] ==1:
@@ -320,15 +483,12 @@ def step_particle(p):
         p["y"] += p["vy"] * dt
     return True
 def update_all_particles():
-    i = 0
-    while i < len(particles):
-        if not step_particle(particles[i]):
-            particles.pop(i)
-        else:
-            i += 1
-    # hard cap so it doesnt lag
-    while len(particles) > MAX_PARTICLES:
-        particles.pop(0)
+    alive = []
+
+    for particle in particles:
+        if step_particle(particle):
+            alive.append(particle)
+    particles[:] = alive[-MAX_PARTICLES:]
 
 
 def update_ripples():
@@ -344,7 +504,7 @@ def update_ripples():
 def maintain_population():
     global jet_timer, accretion_rate
     disk_count = sum(1 for s in particles if s["tp"] == 0)
-    if disk_count < 400 and random.random() < 0.4:
+    if disk_count < 280 and random.random() < 0.32:
         particles.append(make_disk_particle())
     jet_timer += dt
     jet_interval = max(0.02, 0.15 - bh_mass * 0.003)
@@ -353,7 +513,7 @@ def maintain_population():
         particles.append(make_jet_particle(-1))
         jet_timer = 0
     ambient_count = sum(1 for s in particles if s["tp"] == 2)
-    if ambient_count < 100 and random.random() < 0.15:
+    if ambient_count < 60 and random.random() < 0.11:
         a = random.uniform(0, PI2)
         d = random.uniform(100, 400)
         particles.append(make_ambient_particle(bh_x + d*math.cos(a), bh_y + d*math.sin(a)))
@@ -418,8 +578,15 @@ def build_frame():
     core={"x":bh_x,"y":bh_y,"m":bh_mass,"rs":rs,"isco":ir,"ps":ps,"spin":bh_spin,"eaten":total_eaten,"ent":round(entropy_val,3)}
     bl=[{"x":round(b["x"],2),"y":round(b["y"],2),"m":round(b["mass"],2),"r":round(b["draw_radius"],2),"h":round(b["hue"],3)} for b in blobs if b["alive"]]
     ml=[]
-    for p in particles[-800:]:
-        tr=[(round(t[0],1),round(t[1],1),round(t[2],2)) for t in p["tr"]]
+    for p in particles[-600:]:
+        tr = [
+        (
+            round(t[0], 1),
+            round(t[1], 1),
+            round(t[2], 2),
+        )
+        for t in list(p["tr"])[-12:]
+    ]
         ml.append({"x":round(p["x"],2),"y":round(p["y"],2),"b":round(p["br"],3),"w":round(p["ht"],3),"k":p["tp"],"s":round(p["sz"],2),"t":tr})
     sl=[]
     for lx,ly,lb,ls,tw,hu,sec in lensed_stars:
@@ -476,7 +643,6 @@ def trace_all_rays():
         ang=(i/24)*PI2
         sx=bh_x+300*math.cos(ang)
         sy=bh_y+300*math.sin(ang)
-        # aim slightly off center with random impact parameter
         imp=ps*random.uniform(0.5, 2.5)
         aim=ang+math.pi+random.uniform(-0.3, 0.3)
         tx=bh_x+imp*math.cos(aim+math.pi/2)
@@ -489,7 +655,7 @@ def trace_all_rays():
 def update_rays(wall_dt):
     global ray_paths, ray_timer
     ray_timer+=wall_dt
-    if ray_timer>0.1:
+    if ray_timer > 0.35:
         ray_timer=0
         ray_paths=trace_all_rays()
 def get_ray_paths():
@@ -506,101 +672,40 @@ def reset_sim():
 def adjust_spin(d):
     global bh_spin
     bh_spin=clamp(bh_spin+d, 0, 0.998)
-def geodesic_step(x, y, vx, vy, mass, step_dt):
-    r=math.sqrt(x*x+y*y)
-    nx,ny=x/r,y/r
-    v_radial=vx*nx+vy*ny
-    v_tangential=-vx*ny+vy*nx
-    L=r*v_tangential
-    dV=-GRAVITY*mass/(r*r)+L*L/(r**3)-3*GRAVITY*mass*L*L/(C_SIM**2*r**4)
-    v_radial+=dV*step_dt
-    v_tangential=L/r
-    vx=v_radial*nx-v_tangential*ny
-    vy=v_radial*ny+v_tangential*nx
-    x+=vx*step_dt; y+=vy*step_dt
-    return x,y,vx,vy
-def integrate_full_orbit(mass, r_start, L, steps=500):
-    rs=horizon_radius(mass)
-    step_dt=0.01; r=r_start; phi=0; vr=0
-    path=[]
-    for _ in range(steps):
-        path.append((r,phi))
-        dV=-GRAVITY*mass/(r*r)+L*L/(r**3)-3*GRAVITY*mass*L*L/(C_SIM**2*r**4)
-        vr+=dV*step_dt
-        r+=vr*step_dt
-        if r>rs*1.01:
-            phi+=L/(r*r)*step_dt
-        else:
-            break
-        if r<rs*0.5 or r>500:
-            break
-    return path
-def effective_potential(r, L, rs):
-    f=1.0-rs/r
-    return f*(1+L*L/(r*r*C_SIM*C_SIM))
-def find_stable_orbit_r(L, rs):
-    lo=rs*1.5; hi=rs*50; r=(lo+hi)/2
-    for _ in range(40):
-        eps=r*1e-6
-        v1=effective_potential(r+eps, L, rs)
-        v2=effective_potential(r-eps, L, rs)
-        dV=(v1-v2)/(2*eps)
-        v5=effective_potential(r+eps, L, rs)
-        v6=effective_potential(r, L, rs)
-        v7=effective_potential(r-eps, L, rs)
-        d2V=(v5-2*v6+v7)/(eps*eps)
-        if abs(d2V)<1e-15: break
-        r=clamp(r-dV/d2V, lo, hi)
-    return r
-def penrose_shape(n=64):
-    pts=[]
-    for i in range(n):
-        th=(i/n)*PI2
-        r=1.0/(abs(math.cos(th))+abs(math.sin(th)))
-        pts.append((r*math.cos(th), r*math.sin(th)))
-    return pts
-def tortoise(r, rs):
-    return r+rs*math.log(abs(r/rs-1))
-def inv_tortoise(r_star, rs):
-    r=r_star
-    for _ in range(30):
-        if r<=rs*1.001: r=rs*1.01
-        f=r+rs*math.log(abs(r/rs-1))-r_star
-        df=1+rs/(r-rs)
-        if abs(df)<1e-15: break
-        r=r-f/df
-        r=max(r, rs*1.001)
-    return r
-def kerr_isco(spin):
-    a=clamp(spin,0,0.998)
-    z1=1+(1-a*a)**(1/3)*((1+a)**(1/3)+(1-a)**(1/3))
-    z2=math.sqrt(3*a*a+z1*z1)
-    return 3+z2-math.sqrt((3-z1)*(3+z1+2*z2))
-def gw_strain(m1, m2, distance):
-    return 4*6.674e-11**2*m1*m2/(2.998e8**4*distance)
-def orbital_precession(r, mass):
-    return 6*math.pi*GRAVITY*mass/(C_SIM**2*r)
 def physics_loop():
     global sim_time, dt
+    global lens_timer, ring_timer, frame_timer
     last = time.perf_counter()
     while not dead:
         now = time.perf_counter()
-        wall_dt = now - last
+        wall_dt = min(
+            now - last,
+            0.05,)
         last = now
         if not paused:
-            dt = min(wall_dt, 1.0/30.0)
+            dt = min(
+                wall_dt,
+                1.0 / 60.0, )
             sim_time += dt
             update_blobs()
             update_all_particles()
             update_ripples()
             maintain_population()
-            compute_lensing()
-            if int(sim_time * 2) % 4 == 0:
+            lens_timer += dt
+            ring_timer += dt
+            frame_timer += dt
+            if lens_timer >= 0.25:
+                lens_timer = 0.0
+                compute_lensing()
+            if ring_timer >= 0.25:
+                ring_timer = 0.0
                 make_disk_rings(80)
-            calc_entropy()
-            build_frame()
+            if frame_timer >= 1.0 / 30.0:
+                frame_timer = 0.0
+                calc_entropy()
+                build_frame()
         update_rays(wall_dt)
-        time.sleep(1.0 / 120)
+        time.sleep(1.0 / 180.0)
 def start():
     import webview
     init_everything()
@@ -610,7 +715,4 @@ def start():
     webview.start(debug=False)
 start()
 
-
-
-
-
+#this all looks right if any problem pls tell me
