@@ -1,3 +1,6 @@
+readme "created by chatgpt sry iam little lazy"  cuz iam mastermind muha muha ha I()s()r()y()
+
+
 <div align="center">
   <img src="mm.png" alt="Black Hole Simulation banner" width="100%">
 </div>
